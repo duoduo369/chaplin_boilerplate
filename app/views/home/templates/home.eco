@@ -1,0 +1,11 @@
+<div class="container well">
+  <h1>Welcome <strong><%= @user.username %></strong></h1>
+  <p>Avatar: <img src="<%= @user.avatar %>" /></p>
+  <% if @user.id is 789: %>
+  <p>I love you baby.</p>
+  <% end %>
+  <p>Id: <strong><%= @user.id %></strong></p>
+  <p>E-mail: <i><%= @user.email %></i>
+  <p><a href="/user/logout" class="btn btn-warning">Logout</a></p>
+  <div class="my-networks"><h3>My networks: </h3></div>
+</div>
