@@ -1,1 +1,1 @@
-module.exports = class View extends Backbone.view
+module.exports = class View extends Backbone.View
