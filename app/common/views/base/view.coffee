@@ -1,1 +1,1 @@
-module.exports = class View extends Backbone.View
+module.exports = class View extends Chaplin.View

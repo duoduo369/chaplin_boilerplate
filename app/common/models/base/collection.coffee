@@ -1,1 +1,1 @@
-module.exports = class Collection extends Backbone.Collection
+module.exports = class Collection extends Chaplin.Collection
