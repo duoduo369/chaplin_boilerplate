@@ -3,25 +3,20 @@ View = require 'common/views/base/view'
 module.exports = class ItemView extends View
 
   tagName: 'li'
+  className: 'pure-u-1'
+  template: require './templates/item'
 
   events:
     'click .swap': 'swap'
     'click .delete': 'remove'
 
   initialize: ->
-    _.bindAll @
     @model.bind('change', @render)
     @model.bind('remove', @unrender)
+    super
 
-  render: ->
-    @$el.html """
-      <span>#{@model.get 'part1'}  #{@model.get 'part2'}</span>
-      <span class="swap bg-orange">swap</span>
-      <span class="delete bg-pink">delete</span>
-    """
-    @
 
-  unrender: ->
+  unrender: =>
     @$el.remove()
 
   swap: ->

@@ -1,5 +1,5 @@
 /*!
- * Chaplin 0.10.0
+ * Chaplin 1.0.0
  *
  * Chaplin may be freely distributed under the MIT license.
  * For all details and documentation:
@@ -23,7 +23,7 @@ var loader = (function() {
   var loader = function(path) {
     if (cache.hasOwnProperty(path)) return cache[path];
     if (modules.hasOwnProperty(path)) return initModule(path, modules[path]);
-    throw new Error('Cannot find module "' + name + '"');
+    throw new Error('Cannot find module "' + path + '"');
   };
 
   loader.register = function(bundle, fn) {
@@ -41,8 +41,6 @@ _ = loader('underscore');
 
 Backbone = loader('backbone');
 
-mediator = loader('chaplin/mediator');
-
 Dispatcher = loader('chaplin/dispatcher');
 
 Layout = loader('chaplin/views/layout');
@@ -52,6 +50,8 @@ Composer = loader('chaplin/composer');
 Router = loader('chaplin/lib/router');
 
 EventBroker = loader('chaplin/lib/event_broker');
+
+mediator = loader('chaplin/mediator');
 
 module.exports = Application = (function() {
 
@@ -69,7 +69,7 @@ module.exports = Application = (function() {
 
   Application.prototype.composer = null;
 
-  Application.prototype.initialized = false;
+  Application.prototype.started = false;
 
   function Application(options) {
     if (options == null) {
@@ -82,17 +82,15 @@ module.exports = Application = (function() {
     if (options == null) {
       options = {};
     }
-    if (this.initialized) {
-      throw new Error('Application#initialize: App was already initialized');
+    if (this.started) {
+      throw new Error('Application#initialize: App was already started');
     }
     this.initRouter(options.routes, options);
     this.initDispatcher(options);
     this.initLayout(options);
     this.initComposer(options);
     this.initMediator();
-    this.startRouting();
-    this.initialized = true;
-    return typeof Object.freeze === "function" ? Object.freeze(this) : void 0;
+    return this.start();
   };
 
   Application.prototype.initDispatcher = function(options) {
@@ -126,27 +124,24 @@ module.exports = Application = (function() {
     return typeof routes === "function" ? routes(this.router.match) : void 0;
   };
 
-  Application.prototype.startRouting = function() {
-    return this.router.startHistory();
+  Application.prototype.start = function() {
+    this.router.startHistory();
+    this.started = true;
+    return typeof Object.freeze === "function" ? Object.freeze(this) : void 0;
   };
 
   Application.prototype.disposed = false;
 
   Application.prototype.dispose = function() {
-    var frozen, prop, properties, _i, _len;
+    var prop, properties, _i, _len;
     if (this.disposed) {
       return;
     }
-    frozen = typeof Object.isFrozen === "function" ? Object.isFrozen(this) : void 0;
     properties = ['dispatcher', 'layout', 'router', 'composer'];
     for (_i = 0, _len = properties.length; _i < _len; _i++) {
       prop = properties[_i];
-      if (!(this[prop] != null)) {
-        continue;
-      }
-      this[prop].dispose();
-      if (!frozen) {
-        delete this[prop];
+      if (this[prop] != null) {
+        this[prop].dispose();
       }
     }
     this.disposed = true;
@@ -160,9 +155,12 @@ module.exports = Application = (function() {
 });;loader.register('chaplin/mediator', function(e, r, module) {
 'use strict';
 
-var Backbone, mediator, support, utils;
+var Backbone, handlers, mediator, support, utils, _,
+  __slice = [].slice;
 
 Backbone = loader('backbone');
+
+_ = loader('underscore');
 
 support = loader('chaplin/lib/support');
 
@@ -178,7 +176,54 @@ mediator.publish = Backbone.Events.trigger;
 
 mediator._callbacks = null;
 
-utils.readonly(mediator, 'subscribe', 'unsubscribe', 'publish');
+handlers = mediator._handlers = {};
+
+mediator.setHandler = function(name, method, instance) {
+  return handlers[name] = {
+    instance: instance,
+    method: method
+  };
+};
+
+mediator.execute = function() {
+  var args, handler, name, nameOrObj, silent;
+  nameOrObj = arguments[0], args = 2 <= arguments.length ? __slice.call(arguments, 1) : [];
+  silent = false;
+  if (typeof nameOrObj === 'object') {
+    silent = nameOrObj.silent;
+    name = nameOrObj.name;
+  } else {
+    name = nameOrObj;
+  }
+  handler = handlers[name];
+  if (handler) {
+    return handler.method.apply(handler.instance, args);
+  } else if (!silent) {
+    throw new Error("mediator.execute: " + name + " handler is not defined");
+  }
+};
+
+mediator.removeHandlers = function(instanceOrNames) {
+  var handler, name, _i, _len;
+  if (!instanceOrNames) {
+    mediator._handlers = {};
+  }
+  if (utils.isArray(instanceOrNames)) {
+    for (_i = 0, _len = instanceOrNames.length; _i < _len; _i++) {
+      name = instanceOrNames[_i];
+      delete handlers[name];
+    }
+  } else {
+    for (name in handlers) {
+      handler = handlers[name];
+      if (handler.instance === instanceOrNames) {
+        delete handlers[name];
+      }
+    }
+  }
+};
+
+utils.readonly(mediator, 'subscribe', 'unsubscribe', 'publish', 'setHandler', 'execute', 'removeHandlers');
 
 mediator.seal = function() {
   if (support.propertyDescriptors && Object.seal) {
@@ -193,11 +238,13 @@ module.exports = mediator;
 });;loader.register('chaplin/dispatcher', function(e, r, module) {
 'use strict';
 
-var Backbone, Dispatcher, EventBroker, utils, _;
+var Backbone, Dispatcher, EventBroker, mediator, utils, _;
 
 _ = loader('underscore');
 
 Backbone = loader('backbone');
+
+mediator = loader('chaplin/mediator');
 
 utils = loader('chaplin/lib/utils');
 
@@ -217,6 +264,8 @@ module.exports = Dispatcher = (function() {
 
   Dispatcher.prototype.currentParams = null;
 
+  Dispatcher.prototype.currentQuery = null;
+
   function Dispatcher() {
     this.initialize.apply(this, arguments);
   }
@@ -235,15 +284,15 @@ module.exports = Dispatcher = (function() {
   Dispatcher.prototype.dispatch = function(route, params, options) {
     var _ref, _ref1,
       _this = this;
-    params = params ? _.clone(params) : {};
-    options = options ? _.clone(options) : {};
-    if (options.changeURL !== false) {
-      options.changeURL = true;
+    params = params ? _.extend({}, params) : {};
+    options = options ? _.extend({}, options) : {};
+    if (!(options.query != null)) {
+      options.query = {};
     }
     if (options.forceStartup !== true) {
       options.forceStartup = false;
     }
-    if (!options.forceStartup && ((_ref = this.currentRoute) != null ? _ref.controller : void 0) === route.controller && ((_ref1 = this.currentRoute) != null ? _ref1.action : void 0) === route.action && _.isEqual(this.currentParams, params)) {
+    if (!options.forceStartup && ((_ref = this.currentRoute) != null ? _ref.controller : void 0) === route.controller && ((_ref1 = this.currentRoute) != null ? _ref1.action : void 0) === route.action && _.isEqual(this.currentParams, params) && _.isEqual(this.currentQuery, options.query)) {
       return;
     }
     return this.loadController(route.controller, function(Controller) {
@@ -252,24 +301,36 @@ module.exports = Dispatcher = (function() {
   };
 
   Dispatcher.prototype.loadController = function(name, handler) {
-    var fileName, moduleName;
+    var fileName, moduleName,
+      _this = this;
     fileName = name + this.settings.controllerSuffix;
     moduleName = this.settings.controllerPath + fileName;
     if (typeof define !== "undefined" && define !== null ? define.amd : void 0) {
       return require([moduleName], handler);
     } else {
-      return handler(require(moduleName));
+      return setTimeout(function() {
+        return handler(require(moduleName));
+      }, 0);
     }
   };
 
   Dispatcher.prototype.controllerLoaded = function(route, params, options, Controller) {
-    var controller;
-    this.previousRoute = this.currentRoute;
-    this.currentRoute = _.extend({}, route, {
-      previous: utils.beget(this.previousRoute)
-    });
-    controller = new Controller(params, this.currentRoute, options);
-    return this.executeBeforeAction(controller, this.currentRoute, params, options);
+    var controller, prev, previous;
+    if (this.nextPreviousRoute = this.currentRoute) {
+      previous = _.extend({}, this.nextPreviousRoute);
+      if (this.currentParams != null) {
+        previous.params = this.currentParams;
+      }
+      if (previous.previous) {
+        delete previous.previous;
+      }
+      prev = {
+        previous: previous
+      };
+    }
+    this.nextCurrentRoute = _.extend({}, route, prev);
+    controller = new Controller(params, this.nextCurrentRoute, options);
+    return this.executeBeforeAction(controller, this.nextCurrentRoute, params, options);
   };
 
   Dispatcher.prototype.executeAction = function(controller, route, params, options) {
@@ -279,11 +340,11 @@ module.exports = Dispatcher = (function() {
     }
     this.currentController = controller;
     this.currentParams = params;
+    this.currentQuery = options.query;
     controller[route.action](params, route, options);
     if (controller.redirected) {
       return;
     }
-    this.adjustURL(route, params, options);
     return this.publishEvent('dispatcher:dispatch', this.currentController, params, route, options);
   };
 
@@ -292,10 +353,14 @@ module.exports = Dispatcher = (function() {
       _this = this;
     before = controller.beforeAction;
     executeAction = function() {
-      if (controller.redirected || _this.currentRoute && route !== _this.currentRoute) {
+      if (controller.redirected || _this.currentRoute && route === _this.currentRoute) {
+        _this.nextPreviousRoute = _this.nextCurrentRoute = null;
         controller.dispose();
         return;
       }
+      _this.previousRoute = _this.nextPreviousRoute;
+      _this.currentRoute = _this.nextCurrentRoute;
+      _this.nextPreviousRoute = _this.nextCurrentRoute = null;
       return _this.executeAction(controller, route, params, options);
     };
     if (!before) {
@@ -310,17 +375,6 @@ module.exports = Dispatcher = (function() {
       return promise.then(executeAction);
     } else {
       return executeAction();
-    }
-  };
-
-  Dispatcher.prototype.adjustURL = function(route, params, options) {
-    var url;
-    if (route.path == null) {
-      return;
-    }
-    url = route.path + (route.query ? "?" + route.query : "");
-    if (options.changeURL) {
-      return this.publishEvent('!router:changeURL', url, options);
     }
   };
 
@@ -342,11 +396,13 @@ module.exports = Dispatcher = (function() {
 });;loader.register('chaplin/composer', function(e, r, module) {
 'use strict';
 
-var Backbone, Composer, Composition, EventBroker, utils, _;
+var Backbone, Composer, Composition, EventBroker, mediator, utils, _;
 
 _ = loader('underscore');
 
 Backbone = loader('backbone');
+
+mediator = loader('chaplin/mediator');
 
 utils = loader('chaplin/lib/utils');
 
@@ -371,8 +427,8 @@ module.exports = Composer = (function() {
       options = {};
     }
     this.compositions = {};
-    this.subscribeEvent('!composer:compose', this.compose);
-    this.subscribeEvent('!composer:retrieve', this.retrieve);
+    mediator.setHandler('composer:compose', this.compose, this);
+    mediator.setHandler('composer:retrieve', this.retrieve, this);
     return this.subscribeEvent('dispatcher:dispatch', this.cleanup);
   };
 
@@ -413,7 +469,7 @@ module.exports = Composer = (function() {
   };
 
   Composer.prototype._compose = function(name, options) {
-    var composition, current;
+    var composition, current, isPromise, returned;
     if (typeof options.compose !== 'function' && !(options.composition != null)) {
       throw new Error('Composer#compose was used incorrectly');
     }
@@ -427,24 +483,33 @@ module.exports = Composer = (function() {
       }
     }
     current = this.compositions[name];
+    isPromise = false;
     if (current && current.check(composition.options)) {
       current.stale(false);
     } else {
       if (current) {
         current.dispose();
       }
-      composition.compose(composition.options);
+      returned = composition.compose(composition.options);
+      isPromise = typeof (returned != null ? returned.then : void 0) === 'function';
       composition.stale(false);
       this.compositions[name] = composition;
     }
-    return this.compositions[name];
+    if (isPromise) {
+      return returned;
+    } else {
+      return this.compositions[name].item;
+    }
   };
 
-  Composer.prototype.retrieve = function(name, callback) {
-    var active, item;
+  Composer.prototype.retrieve = function(name) {
+    var active;
     active = this.compositions[name];
-    item = (active && !active.stale() ? active.item : void 0);
-    return callback(item);
+    if (active && !active.stale()) {
+      return active.item;
+    } else {
+      return void 0;
+    }
   };
 
   Composer.prototype.cleanup = function() {
@@ -467,6 +532,7 @@ module.exports = Composer = (function() {
       return;
     }
     this.unsubscribeAllEvents();
+    mediator.removeHandlers(this);
     _ref = this.compositions;
     for (name in _ref) {
       composition = _ref[name];
@@ -484,7 +550,8 @@ module.exports = Composer = (function() {
 });;loader.register('chaplin/controllers/controller', function(e, r, module) {
 'use strict';
 
-var Backbone, Controller, EventBroker, _,
+var Backbone, Controller, EventBroker, mediator, utils, _,
+  __slice = [].slice,
   __hasProp = {}.hasOwnProperty;
 
 _ = loader('underscore');
@@ -492,6 +559,10 @@ _ = loader('underscore');
 Backbone = loader('backbone');
 
 EventBroker = loader('chaplin/lib/event_broker');
+
+utils = loader('chaplin/lib/utils');
+
+mediator = loader('chaplin/mediator');
 
 module.exports = Controller = (function() {
 
@@ -514,30 +585,22 @@ module.exports = Controller = (function() {
   Controller.prototype.beforeAction = function() {};
 
   Controller.prototype.adjustTitle = function(subtitle) {
-    return this.publishEvent('!adjustTitle', subtitle);
+    return mediator.execute('adjustTitle', subtitle);
   };
 
-  Controller.prototype.compose = function(name, second, third) {
-    var item;
-    if (arguments.length === 1) {
-      item = null;
-      this.publishEvent('!composer:retrieve', name, function(composition) {
-        return item = composition;
-      });
-      return item;
-    } else {
-      return this.publishEvent('!composer:compose', name, second, third);
-    }
+  Controller.prototype.reuse = function(name) {
+    var method;
+    method = arguments.length === 1 ? 'retrieve' : 'compose';
+    return mediator.execute.apply(mediator, ["composer:" + method].concat(__slice.call(arguments)));
   };
 
-  Controller.prototype.redirectTo = function(url, options) {
+  Controller.prototype.compose = function() {
+    throw new Error('Controller#compose was moved to Controller#reuse');
+  };
+
+  Controller.prototype.redirectTo = function(pathDesc, params, options) {
     this.redirected = true;
-    return this.publishEvent('!router:route', url, options);
-  };
-
-  Controller.prototype.redirectToRoute = function(name, params, options) {
-    this.redirected = true;
-    return this.publishEvent('!router:routeByName', name, params, options);
+    return utils.redirectTo(pathDesc, params, options);
   };
 
   Controller.prototype.disposed = false;
@@ -668,7 +731,7 @@ serializeAttributes = function(model, attributes, modelStack) {
 
 serializeModelAttributes = function(model, currentModel, modelStack) {
   var attributes;
-  if (model === currentModel || _.has(modelStack, model.cid)) {
+  if (model === currentModel || model.cid in modelStack) {
     return null;
   }
   attributes = typeof model.getAttributes === 'function' ? model.getAttributes() : model.attributes;
@@ -720,7 +783,7 @@ module.exports = Model = (function(_super) {
 });;loader.register('chaplin/views/layout', function(e, r, module) {
 'use strict';
 
-var $, Backbone, EventBroker, Layout, View, utils, _,
+var $, Backbone, EventBroker, Layout, View, mediator, utils, _,
   __bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
   __hasProp = {}.hasOwnProperty,
   __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; };
@@ -728,6 +791,8 @@ var $, Backbone, EventBroker, Layout, View, utils, _,
 _ = loader('underscore');
 
 Backbone = loader('backbone');
+
+mediator = loader('chaplin/mediator');
 
 utils = loader('chaplin/lib/utils');
 
@@ -750,11 +815,7 @@ module.exports = Layout = (function(_super) {
   Layout.prototype.globalRegions = null;
 
   Layout.prototype.listen = {
-    'beforeControllerDispose mediator': 'scroll',
-    '!adjustTitle mediator': 'adjustTitle',
-    '!region:show mediator': 'showRegion',
-    '!region:register mediator': 'registerRegionHandler',
-    '!region:unregister mediator': 'unregisterRegionHandler'
+    'beforeControllerDispose mediator': 'scroll'
   };
 
   function Layout(options) {
@@ -769,19 +830,28 @@ module.exports = Layout = (function(_super) {
       this.regions = options.regions;
     }
     this.settings = _.defaults(options, {
-      titleTemplate: _.template("<%= subtitle %> \u2013 <%= title %>"),
+      titleTemplate: function(data) {
+        var st;
+        st = data.subtitle ? "" + data.subtitle + " \u2013 " : '';
+        return st + data.title;
+      },
       openExternalToBlank: false,
       routeLinks: 'a, .go-to',
       skipRouting: '.noscript',
       scrollTo: [0, 0]
     });
+    mediator.setHandler('region:show', this.showRegion, this);
+    mediator.setHandler('region:register', this.registerRegionHandler, this);
+    mediator.setHandler('region:unregister', this.unregisterRegionHandler, this);
+    mediator.setHandler('region:find', this.regionByName, this);
+    mediator.setHandler('adjustTitle', this.adjustTitle, this);
     Layout.__super__.constructor.apply(this, arguments);
     if (this.settings.routeLinks) {
       this.startLinkRouting();
     }
   }
 
-  Layout.prototype.scroll = function(controller) {
+  Layout.prototype.scroll = function() {
     var position;
     position = this.settings.scrollTo;
     if (position) {
@@ -790,7 +860,8 @@ module.exports = Layout = (function(_super) {
   };
 
   Layout.prototype.adjustTitle = function(subtitle) {
-    var title;
+    var title,
+      _this = this;
     if (subtitle == null) {
       subtitle = '';
     }
@@ -798,24 +869,35 @@ module.exports = Layout = (function(_super) {
       title: this.title,
       subtitle: subtitle
     });
-    return setTimeout((function() {
-      return document.title = title;
-    }), 50);
+    setTimeout(function() {
+      document.title = title;
+      return _this.publishEvent('adjustTitle', subtitle, title);
+    }, 50);
+    return title;
   };
 
   Layout.prototype.startLinkRouting = function() {
     var route;
     route = this.settings.routeLinks;
-    if (route) {
+    if (!route) {
+      return;
+    }
+    if ($) {
       return this.$el.on('click', route, this.openLink);
+    } else {
+      return this.delegate('click', route, this.openLink);
     }
   };
 
   Layout.prototype.stopLinkRouting = function() {
     var route;
     route = this.settings.routeLinks;
-    if (route) {
-      return this.$el.off('click', route);
+    if ($) {
+      if (route) {
+        return this.$el.off('click', route);
+      }
+    } else {
+      return this.undelegate('click', route, this.openLink);
     }
   };
 
@@ -825,46 +907,32 @@ module.exports = Layout = (function(_super) {
   };
 
   Layout.prototype.openLink = function(event) {
-    var $el, el, external, href, isAnchor, options, path, query, skipRouting, type, _ref;
+    var el, external, href, isAnchor, skipRouting, type;
     if (utils.modifierKeyPressed(event)) {
       return;
     }
-    el = event.currentTarget;
-    $el = $(el);
+    el = $ ? event.currentTarget : event.delegateTarget;
     isAnchor = el.nodeName === 'A';
-    href = $el.attr('href') || $el.data('href') || null;
-    if (href === null || href === void 0 || href === '' || href.charAt(0) === '#') {
+    href = el.getAttribute('href') || el.getAttribute('data-href') || null;
+    if (!(href != null) || href === '' || href.charAt(0) === '#') {
       return;
     }
     skipRouting = this.settings.skipRouting;
     type = typeof skipRouting;
-    if (type === 'function' && !skipRouting(href, el) || type === 'string' && $el.is(skipRouting)) {
+    if (type === 'function' && !skipRouting(href, el) || type === 'string' && ($ ? $(el).is(skipRouting) : Backbone.utils.matchesSelector(el, skipRouting))) {
       return;
     }
     external = isAnchor && this.isExternalLink(el);
     if (external) {
       if (this.settings.openExternalToBlank) {
         event.preventDefault();
-        window.open(el.href);
+        window.open(href);
       }
       return;
     }
-    if (isAnchor) {
-      path = el.pathname;
-      query = el.search.substring(1);
-      if (path.charAt(0) !== '/') {
-        path = "/" + path;
-      }
-    } else {
-      _ref = href.split('?'), path = _ref[0], query = _ref[1];
-      if (query == null) {
-        query = '';
-      }
-    }
-    options = {
-      query: query
-    };
-    this.publishEvent('!router:route', path, options);
+    utils.redirectTo({
+      url: href
+    });
     event.preventDefault();
   };
 
@@ -906,28 +974,56 @@ module.exports = Layout = (function(_super) {
   };
 
   Layout.prototype.unregisterGlobalRegion = function(instance, name) {
-    var cid;
+    var cid, region;
     cid = instance.cid;
-    return this.globalRegions = _.filter(this.globalRegions, function(region) {
-      return region.instance.cid !== cid || region.name !== name;
-    });
+    return this.globalRegions = (function() {
+      var _i, _len, _ref, _results;
+      _ref = this.globalRegions;
+      _results = [];
+      for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+        region = _ref[_i];
+        if (region.instance.cid !== cid || region.name !== name) {
+          _results.push(region);
+        }
+      }
+      return _results;
+    }).call(this);
   };
 
   Layout.prototype.unregisterGlobalRegions = function(instance) {
-    return this.globalRegions = _.filter(this.globalRegions, function(region) {
-      return region.instance.cid !== instance.cid;
-    });
+    var region;
+    return this.globalRegions = (function() {
+      var _i, _len, _ref, _results;
+      _ref = this.globalRegions;
+      _results = [];
+      for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+        region = _ref[_i];
+        if (region.instance.cid !== instance.cid) {
+          _results.push(region);
+        }
+      }
+      return _results;
+    }).call(this);
+  };
+
+  Layout.prototype.regionByName = function(name) {
+    var reg, _i, _len, _ref;
+    _ref = this.globalRegions;
+    for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+      reg = _ref[_i];
+      if (reg.name === name && !reg.instance.stale) {
+        return reg;
+      }
+    }
   };
 
   Layout.prototype.showRegion = function(name, instance) {
     var region;
-    region = _.find(this.globalRegions, function(region) {
-      return region.name === name && !region.instance.stale;
-    });
+    region = this.regionByName(name);
     if (!region) {
       throw new Error("No region registered under " + name);
     }
-    return instance.container = region.selector === '' ? region.instance.$el : region.instance.$(region.selector);
+    return instance.container = region.selector === '' ? $ ? region.instance.$el : region.instance.el : region.instance.noWrap ? $ ? $(region.instance.container).find(region.selector) : region.instance.container.querySelector(region.selector) : region.instance[$ ? '$' : 'find'](region.selector);
   };
 
   Layout.prototype.dispose = function() {
@@ -941,6 +1037,7 @@ module.exports = Layout = (function(_super) {
       prop = _ref[_i];
       delete this[prop];
     }
+    mediator.removeHandlers(this);
     return Layout.__super__.dispose.apply(this, arguments);
   };
 
@@ -951,19 +1048,68 @@ module.exports = Layout = (function(_super) {
 });;loader.register('chaplin/views/view', function(e, r, module) {
 'use strict';
 
-var $, Backbone, EventBroker, View, utils, _,
+var $, Backbone, EventBroker, View, attach, bind, mediator, setHTML, utils, _,
   __hasProp = {}.hasOwnProperty,
-  __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; };
+  __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
+  __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
 
 _ = loader('underscore');
 
 Backbone = loader('backbone');
 
-utils = loader('chaplin/lib/utils');
+mediator = loader('chaplin/mediator');
 
 EventBroker = loader('chaplin/lib/event_broker');
 
+utils = loader('chaplin/lib/utils');
+
 $ = Backbone.$;
+
+bind = (function() {
+  if (Function.prototype.bind) {
+    return function(item, ctx) {
+      return item.bind(ctx);
+    };
+  } else if (_.bind) {
+    return _.bind;
+  }
+})();
+
+setHTML = (function() {
+  if ($) {
+    return function(elem, html) {
+      return elem.html(html);
+    };
+  } else {
+    return function(elem, html) {
+      return elem.innerHTML = html;
+    };
+  }
+})();
+
+attach = (function() {
+  if ($) {
+    return function(view) {
+      var actual;
+      actual = $(view.container);
+      if (typeof view.containerMethod === 'function') {
+        return view.containerMethod(actual, view.el);
+      } else {
+        return actual[view.containerMethod](view.el);
+      }
+    };
+  } else {
+    return function(view) {
+      var actual;
+      actual = typeof view.container === 'string' ? document.querySelector(view.container) : view.container;
+      if (typeof view.containerMethod === 'function') {
+        return view.containerMethod(actual, view.el);
+      } else {
+        return actual[view.containerMethod](view.el);
+      }
+    };
+  }
+})();
 
 module.exports = View = (function(_super) {
 
@@ -971,31 +1117,40 @@ module.exports = View = (function(_super) {
 
   _.extend(View.prototype, EventBroker);
 
-  View.prototype.keepElement = false;
-
   View.prototype.autoRender = false;
 
   View.prototype.autoAttach = true;
 
   View.prototype.container = null;
 
-  View.prototype.containerMethod = 'append';
+  View.prototype.containerMethod = $ ? 'append' : 'appendChild';
 
   View.prototype.regions = null;
 
   View.prototype.region = null;
 
+  View.prototype.stale = false;
+
+  View.prototype.noWrap = false;
+
+  View.prototype.keepElement = false;
+
   View.prototype.subviews = null;
 
   View.prototype.subviewsByName = null;
 
-  View.prototype.stale = false;
+  View.prototype.optionNames = ['autoAttach', 'autoRender', 'container', 'containerMethod', 'region', 'regions', 'noWrap'];
 
   function View(options) {
-    var render,
+    var optName, optValue, region, render,
       _this = this;
     if (options) {
-      _.extend(this, _.pick(options, ['autoAttach', 'autoRender', 'container', 'containerMethod', 'region', 'regions']));
+      for (optName in options) {
+        optValue = options[optName];
+        if (__indexOf.call(this.optionNames, optName) >= 0) {
+          this[optName] = optValue;
+        }
+      }
     }
     render = this.render;
     this.render = function() {
@@ -1010,6 +1165,17 @@ module.exports = View = (function(_super) {
     };
     this.subviews = [];
     this.subviewsByName = {};
+    if (this.noWrap) {
+      if (this.region) {
+        region = mediator.execute('region:find', this.region);
+        if (region != null) {
+          this.el = region.instance.container != null ? region.instance.region != null ? $(region.instance.container).find(region.selector) : region.instance.container : region.instance.$(region.selector);
+        }
+      }
+      if (this.container) {
+        this.el = this.container;
+      }
+    }
     View.__super__.constructor.apply(this, arguments);
     this.delegateListeners();
     if (this.model) {
@@ -1023,7 +1189,7 @@ module.exports = View = (function(_super) {
       });
     }
     if (this.regions != null) {
-      this.publishEvent('!region:register', this);
+      mediator.execute('region:register', this);
     }
     if (this.autoRender) {
       this.render();
@@ -1031,8 +1197,10 @@ module.exports = View = (function(_super) {
   }
 
   View.prototype.delegate = function(eventName, second, third) {
-    var bound, events, handler, list, selector,
-      _this = this;
+    var bound, event, events, handler, list, selector;
+    if (Backbone.utils) {
+      return Backbone.utils.delegate(this, eventName, second, third);
+    }
     if (typeof eventName !== 'string') {
       throw new TypeError('View#delegate: first argument must be a string');
     }
@@ -1050,40 +1218,48 @@ module.exports = View = (function(_super) {
     if (typeof handler !== 'function') {
       throw new TypeError('View#delegate: ' + 'handler argument must be function');
     }
-    list = _.map(eventName.split(' '), function(event) {
-      return "" + event + ".delegate" + _this.cid;
-    });
+    list = (function() {
+      var _i, _len, _ref, _results;
+      _ref = eventName.split(' ');
+      _results = [];
+      for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+        event = _ref[_i];
+        _results.push("" + event + ".delegate" + this.cid);
+      }
+      return _results;
+    }).call(this);
     events = list.join(' ');
-    bound = _.bind(handler, this);
+    bound = bind(handler, this);
     this.$el.on(events, selector || null, bound);
     return bound;
   };
 
   View.prototype._delegateEvents = function(events) {
     var bound, eventName, handler, key, match, selector, value;
+    if (Backbone.View.prototype.delegateEvents.length === 2) {
+      return Backbone.View.prototype.delegateEvents.call(this, events, true);
+    }
     for (key in events) {
       value = events[key];
       handler = typeof value === 'function' ? value : this[value];
       if (!handler) {
-        throw new Error("Method '" + handler + "' does not exist");
+        throw new Error("Method '" + value + "' does not exist");
       }
       match = key.match(/^(\S+)\s*(.*)$/);
       eventName = "" + match[1] + ".delegateEvents" + this.cid;
       selector = match[2];
-      bound = _.bind(handler, this);
+      bound = bind(handler, this);
       this.$el.on(eventName, selector || null, bound);
     }
   };
 
-  View.prototype.delegateEvents = function(events) {
+  View.prototype.delegateEvents = function(events, keepOld) {
     var classEvents, _i, _len, _ref;
-    this.undelegateEvents();
-    if (events) {
-      this._delegateEvents(events);
-      return;
+    if (!keepOld) {
+      this.undelegateEvents();
     }
-    if (!this.events) {
-      return;
+    if (events) {
+      return this._delegateEvents(events);
     }
     _ref = utils.getAllPropertyVersions(this, 'events');
     for (_i = 0, _len = _ref.length; _i < _len; _i++) {
@@ -1096,8 +1272,10 @@ module.exports = View = (function(_super) {
   };
 
   View.prototype.undelegate = function(eventName, second, third) {
-    var events, handler, list, selector,
-      _this = this;
+    var event, events, handler, list, selector;
+    if (Backbone.utils) {
+      return Backbone.utils.undelegate(this, eventName, second, third);
+    }
     if (eventName) {
       if (typeof eventName !== 'string') {
         throw new TypeError('View#undelegate: first argument must be a string');
@@ -1115,9 +1293,16 @@ module.exports = View = (function(_super) {
         }
         handler = third;
       }
-      list = _.map(eventName.split(' '), function(event) {
-        return "" + event + ".delegate" + _this.cid;
-      });
+      list = (function() {
+        var _i, _len, _ref, _results;
+        _ref = eventName.split(' ');
+        _results = [];
+        for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+          event = _ref[_i];
+          _results.push("" + event + ".delegate" + this.cid);
+        }
+        return _results;
+      }).call(this);
       events = list.join(' ');
       return this.$el.off(events, selector || null);
     } else {
@@ -1162,15 +1347,18 @@ module.exports = View = (function(_super) {
   };
 
   View.prototype.registerRegion = function(name, selector) {
-    return this.publishEvent('!region:register', this, name, selector);
+    return mediator.execute('region:register', this, name, selector);
   };
 
   View.prototype.unregisterRegion = function(name) {
-    return this.publishEvent('!region:unregister', this, name);
+    return mediator.execute('region:unregister', this, name);
   };
 
   View.prototype.unregisterAllRegions = function() {
-    return this.publishEvent('!region:unregister', this);
+    return mediator.execute({
+      name: 'region:unregister',
+      silent: true
+    }, this);
   };
 
   View.prototype.subview = function(name, view) {
@@ -1201,17 +1389,18 @@ module.exports = View = (function(_super) {
       view = nameOrView;
       for (otherName in byName) {
         otherView = byName[otherName];
-        if (view === otherView) {
-          name = otherName;
-          break;
+        if (!(otherView === view)) {
+          continue;
         }
+        name = otherName;
+        break;
       }
     }
     if (!(name && view && view.dispose)) {
       return;
     }
     view.dispose();
-    index = _.indexOf(subviews, view);
+    index = utils.indexOf(subviews, view);
     if (index !== -1) {
       subviews.splice(index, 1);
     }
@@ -1238,24 +1427,34 @@ module.exports = View = (function(_super) {
   };
 
   View.prototype.render = function() {
-    var html, templateFunc;
+    var el, html, templateFunc;
     if (this.disposed) {
       return false;
     }
     templateFunc = this.getTemplateFunction();
     if (typeof templateFunc === 'function') {
       html = templateFunc(this.getTemplateData());
-      this.$el.html(html);
+      if (this.noWrap) {
+        el = document.createElement('div');
+        el.innerHTML = html;
+        if (el.children.length > 1) {
+          throw new Error('There must be a single top-level element when ' + 'using `noWrap`.');
+        }
+        this.undelegateEvents();
+        this.setElement(el.firstChild, true);
+      } else {
+        setHTML(($ ? this.$el : this.el), html);
+      }
     }
     return this;
   };
 
   View.prototype.attach = function() {
     if (this.region != null) {
-      this.publishEvent('!region:show', this.region, this);
+      mediator.execute('region:show', this.region, this);
     }
-    if (this.container) {
-      $(this.container)[this.containerMethod](this.el);
+    if (this.container && !document.body.contains(this.el)) {
+      attach(this);
       return this.trigger('addedToDOM');
     }
   };
@@ -1298,7 +1497,7 @@ module.exports = View = (function(_super) {
 });;loader.register('chaplin/views/collection_view', function(e, r, module) {
 'use strict';
 
-var $, Backbone, CollectionView, View, _,
+var $, Backbone, CollectionView, View, addClass, endAnimation, filterChildren, insertView, startAnimation, toggleElement, utils, _,
   __bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
   __hasProp = {}.hasOwnProperty,
   __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; };
@@ -1309,7 +1508,143 @@ Backbone = loader('backbone');
 
 View = loader('chaplin/views/view');
 
+utils = loader('chaplin/lib/utils');
+
 $ = Backbone.$;
+
+filterChildren = function(nodeList, selector) {
+  var node, _i, _len, _results;
+  if (!selector) {
+    return nodeList;
+  }
+  _results = [];
+  for (_i = 0, _len = nodeList.length; _i < _len; _i++) {
+    node = nodeList[_i];
+    if (Backbone.utils.matchesSelector(node, selector)) {
+      _results.push(node);
+    }
+  }
+  return _results;
+};
+
+toggleElement = (function() {
+  if ($) {
+    return function(elem, visible) {
+      return elem.toggle(visible);
+    };
+  } else {
+    return function(elem, visible) {
+      return elem.style.display = (visible ? '' : 'none');
+    };
+  }
+})();
+
+addClass = (function() {
+  if ($) {
+    return function(elem, cls) {
+      return elem.addClass(cls);
+    };
+  } else {
+    return function(elem, cls) {
+      return elem.classList.add(cls);
+    };
+  }
+})();
+
+startAnimation = (function() {
+  if ($) {
+    return function(elem, useCssAnimation, cls) {
+      if (useCssAnimation) {
+        return addClass(elem, cls);
+      } else {
+        return elem.css('opacity', 0);
+      }
+    };
+  } else {
+    return function(elem, useCssAnimation, cls) {
+      if (useCssAnimation) {
+        return addClass(elem, cls);
+      } else {
+        return elem.style.opacity = 0;
+      }
+    };
+  }
+})();
+
+endAnimation = (function() {
+  if ($) {
+    return function(elem, duration) {
+      return elem.animate({
+        opacity: 1
+      }, duration);
+    };
+  } else {
+    return function(elem, duration) {
+      elem.style.transition = "opacity " + (duration / 1000) + "s";
+      return elem.opacity = 1;
+    };
+  }
+})();
+
+insertView = (function() {
+  if ($) {
+    return function(list, viewEl, position, length, itemSelector) {
+      var children, childrenLength, insertInMiddle, isEnd, method;
+      insertInMiddle = (0 < position && position < length);
+      isEnd = function(length) {
+        return length === 0 || position === length;
+      };
+      if (insertInMiddle || itemSelector) {
+        children = list.children(itemSelector);
+        childrenLength = children.length;
+        if (children[position] !== viewEl) {
+          if (isEnd(childrenLength)) {
+            return list.append(viewEl);
+          } else {
+            if (position === 0) {
+              return children.eq(position).before(viewEl);
+            } else {
+              return children.eq(position - 1).after(viewEl);
+            }
+          }
+        }
+      } else {
+        method = isEnd(length) ? 'append' : 'prepend';
+        return list[method](viewEl);
+      }
+    };
+  } else {
+    return function(list, viewEl, position, length, itemSelector) {
+      var children, childrenLength, insertInMiddle, isEnd, last;
+      insertInMiddle = (0 < position && position < length);
+      isEnd = function(length) {
+        return length === 0 || position === length;
+      };
+      if (insertInMiddle || itemSelector) {
+        children = filterChildren(list.children, itemSelector);
+        childrenLength = children.length;
+        if (children[position] !== viewEl) {
+          if (isEnd(childrenLength)) {
+            return list.appendChild(viewEl);
+          } else if (position === 0) {
+            return list.insertBefore(viewEl, children[position]);
+          } else {
+            last = children[position - 1];
+            if (list.lastChild === last) {
+              return list.appendChild(viewEl);
+            } else {
+              return list.insertBefore(viewEl, last.nextElementSibling);
+            }
+          }
+        }
+      } else if (isEnd(length)) {
+        return list.appendChild(viewEl);
+      } else {
+        return list.insertBefore(viewEl, list.firstChild);
+      }
+    };
+  }
+})();
 
 module.exports = CollectionView = (function(_super) {
 
@@ -1346,10 +1681,15 @@ module.exports = CollectionView = (function(_super) {
   CollectionView.prototype.filterer = null;
 
   CollectionView.prototype.filterCallback = function(view, included) {
-    return view.$el.stop(true, true).toggle(included);
+    if ($) {
+      view.$el.stop(true, true);
+    }
+    return toggleElement(($ ? view.$el : view.el), included);
   };
 
   CollectionView.prototype.visibleItems = null;
+
+  CollectionView.prototype.optionNames = View.prototype.optionNames.concat(['renderItems', 'itemView']);
 
   function CollectionView(options) {
     this.renderAllItems = __bind(this.renderAllItems, this);
@@ -1361,9 +1701,6 @@ module.exports = CollectionView = (function(_super) {
     this.itemRemoved = __bind(this.itemRemoved, this);
 
     this.itemAdded = __bind(this.itemAdded, this);
-    if (options) {
-      _.extend(this, _.pick(options, ['renderItems', 'itemView']));
-    }
     this.visibleItems = [];
     CollectionView.__super__.constructor.apply(this, arguments);
   }
@@ -1398,8 +1735,14 @@ module.exports = CollectionView = (function(_super) {
   CollectionView.prototype.getTemplateFunction = function() {};
 
   CollectionView.prototype.render = function() {
+    var listSelector;
     CollectionView.__super__.render.apply(this, arguments);
-    this.$list = this.listSelector ? this.$(this.listSelector) : this.$el;
+    listSelector = _.result(this, 'listSelector');
+    if ($) {
+      this.$list = listSelector ? this.$(listSelector) : this.$el;
+    } else {
+      this.list = listSelector ? this.find(this.listSelector) : this.el;
+    }
     this.initFallback();
     this.initLoadingIndicator();
     if (this.renderItems) {
@@ -1423,7 +1766,11 @@ module.exports = CollectionView = (function(_super) {
     if (!this.fallbackSelector) {
       return;
     }
-    this.$fallback = this.$(this.fallbackSelector);
+    if ($) {
+      this.$fallback = this.$(this.fallbackSelector);
+    } else {
+      this.fallback = this.find(this.fallbackSelector);
+    }
     this.on('visibilityChange', this.toggleFallback);
     this.listenTo(this.collection, 'syncStateChange', this.toggleFallback);
     return this.toggleFallback();
@@ -1432,14 +1779,18 @@ module.exports = CollectionView = (function(_super) {
   CollectionView.prototype.toggleFallback = function() {
     var visible;
     visible = this.visibleItems.length === 0 && (typeof this.collection.isSynced === 'function' ? this.collection.isSynced() : true);
-    return this.$fallback.toggle(visible);
+    return toggleElement(($ ? this.$fallback : this.fallback), visible);
   };
 
   CollectionView.prototype.initLoadingIndicator = function() {
     if (!(this.loadingSelector && typeof this.collection.isSyncing === 'function')) {
       return;
     }
-    this.$loading = this.$(this.loadingSelector);
+    if ($) {
+      this.$loading = this.$(this.loadingSelector);
+    } else {
+      this.loading = this.find(this.loadingSelector);
+    }
     this.listenTo(this.collection, 'syncStateChange', this.toggleLoadingIndicator);
     return this.toggleLoadingIndicator();
   };
@@ -1447,7 +1798,7 @@ module.exports = CollectionView = (function(_super) {
   CollectionView.prototype.toggleLoadingIndicator = function() {
     var visible;
     visible = this.collection.length === 0 && this.collection.isSyncing();
-    return this.$loading.toggle(visible);
+    return toggleElement(($ ? this.$loading : this.loading), visible);
   };
 
   CollectionView.prototype.getItemViews = function() {
@@ -1466,19 +1817,30 @@ module.exports = CollectionView = (function(_super) {
   };
 
   CollectionView.prototype.filter = function(filterer, filterCallback) {
-    var included, index, item, view, _i, _len, _ref;
-    this.filterer = filterer;
-    if (filterCallback) {
+    var hasItemViews, included, index, item, view, _i, _len, _ref,
+      _this = this;
+    if (typeof filterer === 'function' || filterer === null) {
+      this.filterer = filterer;
+    }
+    if (typeof filterCallback === 'function' || filterCallback === null) {
       this.filterCallback = filterCallback;
     }
-    if (filterCallback == null) {
-      filterCallback = this.filterCallback;
-    }
-    if (!_.isEmpty(this.getItemViews())) {
+    hasItemViews = (function() {
+      var name;
+      if (_this.subviews.length > 0) {
+        for (name in _this.subviewsByName) {
+          if (name.slice(0, 9) === 'itemView:') {
+            return true;
+          }
+        }
+      }
+      return false;
+    })();
+    if (hasItemViews) {
       _ref = this.collection.models;
       for (index = _i = 0, _len = _ref.length; _i < _len; index = ++_i) {
         item = _ref[index];
-        included = typeof filterer === 'function' ? filterer(item, index) : true;
+        included = typeof this.filterer === 'function' ? this.filterer(item, index) : true;
         view = this.subview("itemView:" + item.cid);
         if (!view) {
           throw new Error('CollectionView#filter: ' + ("no view found for " + item.cid));
@@ -1538,8 +1900,8 @@ module.exports = CollectionView = (function(_super) {
   CollectionView.prototype.initItemView = function(model) {
     if (this.itemView) {
       return new this.itemView({
-        model: model,
-        autoRender: false
+        autoRender: false,
+        model: model
       });
     } else {
       throw new Error('The CollectionView#itemView property ' + 'must be defined or the initItemView() must be overridden.');
@@ -1547,7 +1909,7 @@ module.exports = CollectionView = (function(_super) {
   };
 
   CollectionView.prototype.insertView = function(item, view, position, enableAnimation) {
-    var $list, $next, $previous, $viewEl, children, childrenLength, included, insertInMiddle, isEnd, length, method, viewEl,
+    var elem, included, length, list,
       _this = this;
     if (enableAnimation == null) {
       enableAnimation = true;
@@ -1559,55 +1921,25 @@ module.exports = CollectionView = (function(_super) {
       position = this.collection.indexOf(item);
     }
     included = typeof this.filterer === 'function' ? this.filterer(item, position) : true;
-    viewEl = view.el;
-    $viewEl = view.$el;
+    elem = $ ? view.$el : view.el;
     if (included && enableAnimation) {
-      if (this.useCssAnimation) {
-        $viewEl.addClass(this.animationStartClass);
-      } else {
-        $viewEl.css('opacity', 0);
-      }
+      startAnimation(elem, this.useCssAnimation, this.animationStartClass);
     }
     if (this.filterer) {
       this.filterCallback(view, included);
     }
     length = this.collection.length;
-    insertInMiddle = (0 < position && position < length);
-    isEnd = function(length) {
-      return length === 0 || position === length;
-    };
-    $list = this.$list;
-    if (insertInMiddle || this.itemSelector) {
-      children = $list.children(this.itemSelector);
-      childrenLength = children.length;
-      if (children.get(position) !== viewEl) {
-        if (isEnd(childrenLength)) {
-          $list.append(viewEl);
-        } else {
-          if (position === 0) {
-            $next = children.eq(position);
-            $next.before(viewEl);
-          } else {
-            $previous = children.eq(position - 1);
-            $previous.after(viewEl);
-          }
-        }
-      }
-    } else {
-      method = isEnd(length) ? 'append' : 'prepend';
-      $list[method](viewEl);
-    }
+    list = $ ? this.$list : this.list;
+    insertView(list, elem, position, length, this.itemSelector);
     view.trigger('addedToParent');
     this.updateVisibleItems(item, included);
     if (included && enableAnimation) {
       if (this.useCssAnimation) {
-        setTimeout(function() {
-          return $viewEl.addClass(_this.animationEndClass);
-        }, 0);
+        setTimeout((function() {
+          return addClass(elem, _this.animationEndClass);
+        }), 0);
       } else {
-        $viewEl.animate({
-          opacity: 1
-        }, this.animationDuration);
+        endAnimation(elem, this.animationDuration);
       }
     }
     return view;
@@ -1624,7 +1956,7 @@ module.exports = CollectionView = (function(_super) {
       triggerEvent = true;
     }
     visibilityChanged = false;
-    visibleItemsIndex = _.indexOf(this.visibleItems, item);
+    visibleItemsIndex = utils.indexOf(this.visibleItems, item);
     includedInVisibleItems = visibleItemsIndex !== -1;
     if (includedInFilter && !includedInVisibleItems) {
       this.visibleItems.push(item);
@@ -1659,7 +1991,7 @@ module.exports = CollectionView = (function(_super) {
 });;loader.register('chaplin/lib/route', function(e, r, module) {
 'use strict';
 
-var Backbone, Controller, EventBroker, Route, _,
+var Backbone, Controller, EventBroker, Route, utils, _,
   __bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
   __hasProp = {}.hasOwnProperty;
 
@@ -1671,14 +2003,35 @@ EventBroker = loader('chaplin/lib/event_broker');
 
 Controller = loader('chaplin/controllers/controller');
 
+utils = loader('chaplin/lib/utils');
+
 module.exports = Route = (function() {
-  var escapeRegExp;
+  var escapeRegExp, optionalRegExp, paramRegExp, processTrailingSlash;
 
   Route.extend = Backbone.Model.extend;
 
   _.extend(Route.prototype, EventBroker);
 
-  escapeRegExp = /[-[\]{}()+?.,\\^$|#\s]/g;
+  escapeRegExp = /[\-{}\[\]+?.,\\\^$|#\s]/g;
+
+  optionalRegExp = /\((.*?)\)/g;
+
+  paramRegExp = /(?::|\*)(\w+)/g;
+
+  processTrailingSlash = function(path, trailing) {
+    switch (trailing) {
+      case true:
+        if (path.slice(-1) !== '/') {
+          path += '/';
+        }
+        break;
+      case false:
+        if (path.slice(-1) === '/') {
+          path = path.slice(0, -1);
+        }
+    }
+    return path;
+  };
 
   function Route(pattern, controller, action, options) {
     var _ref;
@@ -1687,13 +2040,15 @@ module.exports = Route = (function() {
     this.action = action;
     this.handler = __bind(this.handler, this);
 
-    this.addParamName = __bind(this.addParamName, this);
+    this.replaceParams = __bind(this.replaceParams, this);
 
-    if (_.isRegExp(this.pattern)) {
+    this.parseOptionalPortion = __bind(this.parseOptionalPortion, this);
+
+    if (typeof this.pattern !== 'string') {
       throw new Error('Route: RegExps are not supported.\
         Use strings with :names and `constraints` option of route');
     }
-    this.options = options ? _.clone(options) : {};
+    this.options = options ? _.extend({}, options) : {};
     if (this.options.name != null) {
       this.name = this.options.name;
     }
@@ -1703,8 +2058,10 @@ module.exports = Route = (function() {
     if ((_ref = this.name) == null) {
       this.name = this.controller + '#' + this.action;
     }
-    this.paramNames = [];
-    if (_.has(Controller.prototype, this.action)) {
+    this.allParams = [];
+    this.requiredParams = [];
+    this.optionalParams = [];
+    if (this.action in Controller.prototype) {
       throw new Error('Route: You should not use existing controller ' + 'properties as action names');
     }
     this.createRegExp();
@@ -1714,78 +2071,95 @@ module.exports = Route = (function() {
   }
 
   Route.prototype.matches = function(criteria) {
-    var name, property, _i, _len, _ref;
+    var invalidParamsCount, name, propertiesCount, property, _i, _len, _ref;
     if (typeof criteria === 'string') {
       return criteria === this.name;
     } else {
+      propertiesCount = 0;
       _ref = ['name', 'action', 'controller'];
       for (_i = 0, _len = _ref.length; _i < _len; _i++) {
         name = _ref[_i];
+        propertiesCount++;
         property = criteria[name];
         if (property && property !== this[name]) {
           return false;
         }
       }
-      return true;
+      invalidParamsCount = propertiesCount === 1 && (name === 'action' || name === 'controller');
+      return !invalidParamsCount;
     }
   };
 
-  Route.prototype.reverse = function(params) {
-    var index, name, url, value, _i, _len, _ref;
+  Route.prototype.reverse = function(params, query) {
+    var name, queryString, raw, url, value, _i, _j, _len, _len1, _ref, _ref1;
+    params = this.normalizeParams(params);
+    if (params === false) {
+      return false;
+    }
     url = this.pattern;
-    if (_.isArray(params)) {
-      if (params.length < this.paramNames.length) {
-        return false;
-      }
-      index = 0;
-      url = url.replace(/[:*][^\/\?]+/g, function(match) {
-        var result;
-        result = params[index];
-        index += 1;
-        return result;
-      });
-    } else {
-      _ref = this.paramNames;
-      for (_i = 0, _len = _ref.length; _i < _len; _i++) {
-        name = _ref[_i];
-        value = params[name];
-        if (value === void 0) {
-          return false;
-        }
+    _ref = this.requiredParams;
+    for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+      name = _ref[_i];
+      value = params[name];
+      url = url.replace(RegExp("[:*]" + name, "g"), value);
+    }
+    _ref1 = this.optionalParams;
+    for (_j = 0, _len1 = _ref1.length; _j < _len1; _j++) {
+      name = _ref1[_j];
+      if (value = params[name]) {
         url = url.replace(RegExp("[:*]" + name, "g"), value);
       }
     }
-    if (this.test(url)) {
+    raw = url.replace(optionalRegExp, function(match, portion) {
+      if (portion.match(/[:*]/g)) {
+        return "";
+      } else {
+        return portion;
+      }
+    });
+    url = processTrailingSlash(raw, this.options.trailing);
+    if (!query) {
       return url;
+    }
+    if (typeof query === 'object') {
+      queryString = utils.queryParams.stringify(query);
+      return url += queryString ? '?' + queryString : '';
     } else {
-      return false;
+      return url += (query[0] === '?' ? '' : '?') + query;
     }
   };
 
-  Route.prototype.createRegExp = function() {
-    var pattern;
-    pattern = this.pattern.replace(escapeRegExp, '\\$&').replace(/(?::|\*)(\w+)/g, this.addParamName);
-    return this.regExp = RegExp("^" + pattern + "(?=\\?|$)");
-  };
-
-  Route.prototype.addParamName = function(match, paramName) {
-    this.paramNames.push(paramName);
-    if (match.charAt(0) === ':') {
-      return '([^\/\?]+)';
+  Route.prototype.normalizeParams = function(params) {
+    var paramIndex, paramName, paramsHash, _i, _len, _ref;
+    if (utils.isArray(params)) {
+      if (params.length < this.requiredParams.length) {
+        return false;
+      }
+      paramsHash = {};
+      _ref = this.requiredParams;
+      for (paramIndex = _i = 0, _len = _ref.length; _i < _len; paramIndex = ++_i) {
+        paramName = _ref[paramIndex];
+        paramsHash[paramName] = params[paramIndex];
+      }
+      if (!this.testConstraints(paramsHash)) {
+        return false;
+      }
+      params = paramsHash;
     } else {
-      return '(.*?)';
+      if (params == null) {
+        params = {};
+      }
+      if (!this.testParams(params)) {
+        return false;
+      }
     }
+    return params;
   };
 
-  Route.prototype.test = function(path) {
-    var constraint, constraints, matched, name, params;
-    matched = this.regExp.test(path);
-    if (!matched) {
-      return false;
-    }
+  Route.prototype.testConstraints = function(params) {
+    var constraint, constraints, name;
     constraints = this.options.constraints;
     if (constraints) {
-      params = this.extractParams(path);
       for (name in constraints) {
         if (!__hasProp.call(constraints, name)) continue;
         constraint = constraints[name];
@@ -1797,11 +2171,87 @@ module.exports = Route = (function() {
     return true;
   };
 
-  Route.prototype.handler = function(path, options) {
-    var params, query, route, _ref;
-    options = options ? _.clone(options) : {};
-    query = (_ref = options.query) != null ? _ref : this.getCurrentQuery();
-    params = this.buildParams(path, query);
+  Route.prototype.testParams = function(params) {
+    var paramName, _i, _len, _ref;
+    _ref = this.requiredParams;
+    for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+      paramName = _ref[_i];
+      if (params[paramName] === void 0) {
+        return false;
+      }
+    }
+    return this.testConstraints(params);
+  };
+
+  Route.prototype.createRegExp = function() {
+    var pattern,
+      _this = this;
+    pattern = this.pattern;
+    pattern = pattern.replace(escapeRegExp, '\\$&');
+    this.replaceParams(pattern, function(match, param) {
+      return _this.allParams.push(param);
+    });
+    pattern = pattern.replace(optionalRegExp, this.parseOptionalPortion);
+    pattern = this.replaceParams(pattern, function(match, param) {
+      _this.requiredParams.push(param);
+      return _this.paramCapturePattern(match);
+    });
+    return this.regExp = RegExp("^" + pattern + "(?=\\/?(?=\\?|$))");
+  };
+
+  Route.prototype.parseOptionalPortion = function(match, optionalPortion) {
+    var portion,
+      _this = this;
+    portion = this.replaceParams(optionalPortion, function(match, param) {
+      _this.optionalParams.push(param);
+      return _this.paramCapturePattern(match);
+    });
+    return "(?:" + portion + ")?";
+  };
+
+  Route.prototype.replaceParams = function(s, callback) {
+    return s.replace(paramRegExp, callback);
+  };
+
+  Route.prototype.paramCapturePattern = function(param) {
+    if (param.charAt(0) === ':') {
+      return '([^\/\?]+)';
+    } else {
+      return '(.*?)';
+    }
+  };
+
+  Route.prototype.test = function(path) {
+    var constraints, matched;
+    matched = this.regExp.test(path);
+    if (!matched) {
+      return false;
+    }
+    constraints = this.options.constraints;
+    if (constraints) {
+      return this.testConstraints(this.extractParams(path));
+    }
+    return true;
+  };
+
+  Route.prototype.handler = function(pathParams, options) {
+    var actionParams, params, path, query, route, _ref;
+    options = options ? _.extend({}, options) : {};
+    if (typeof pathParams === 'object') {
+      query = utils.queryParams.stringify(options.query);
+      params = pathParams;
+      path = this.reverse(params);
+    } else {
+      _ref = pathParams.split('?'), path = _ref[0], query = _ref[1];
+      if (!(query != null)) {
+        query = '';
+      } else {
+        options.query = utils.queryParams.parse(query);
+      }
+      params = this.extractParams(path);
+      path = processTrailingSlash(path, this.options.trailing);
+    }
+    actionParams = _.extend({}, params, this.options.params);
     route = {
       path: path,
       action: this.action,
@@ -1809,16 +2259,7 @@ module.exports = Route = (function() {
       name: this.name,
       query: query
     };
-    delete options.query;
-    return this.publishEvent('router:match', route, params, options);
-  };
-
-  Route.prototype.getCurrentQuery = function() {
-    return location.search.substring(1);
-  };
-
-  Route.prototype.buildParams = function(path, query) {
-    return _.extend({}, this.extractQueryParams(query), this.extractParams(path), this.options.params);
+    return this.publishEvent('router:match', route, actionParams, options);
   };
 
   Route.prototype.extractParams = function(path) {
@@ -1828,40 +2269,8 @@ module.exports = Route = (function() {
     _ref = matches.slice(1);
     for (index = _i = 0, _len = _ref.length; _i < _len; index = ++_i) {
       match = _ref[index];
-      paramName = this.paramNames.length ? this.paramNames[index] : index;
+      paramName = this.allParams.length ? this.allParams[index] : index;
       params[paramName] = match;
-    }
-    return params;
-  };
-
-  Route.prototype.extractQueryParams = function(query) {
-    var current, field, pair, pairs, params, value, _i, _len, _ref;
-    params = {};
-    if (!query) {
-      return params;
-    }
-    pairs = query.split('&');
-    for (_i = 0, _len = pairs.length; _i < _len; _i++) {
-      pair = pairs[_i];
-      if (!pair.length) {
-        continue;
-      }
-      _ref = pair.split('='), field = _ref[0], value = _ref[1];
-      if (!field.length) {
-        continue;
-      }
-      field = decodeURIComponent(field);
-      value = decodeURIComponent(value);
-      current = params[field];
-      if (current) {
-        if (current.push) {
-          current.push(value);
-        } else {
-          params[field] = [current, value];
-        }
-      } else {
-        params[field] = value;
-      }
     }
     return params;
   };
@@ -1873,14 +2282,18 @@ module.exports = Route = (function() {
 });;loader.register('chaplin/lib/router', function(e, r, module) {
 'use strict';
 
-var Backbone, EventBroker, Route, Router, utils, _,
+var Backbone, EventBroker, History, Route, Router, mediator, utils, _,
   __bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; };
 
 _ = loader('underscore');
 
 Backbone = loader('backbone');
 
+mediator = loader('chaplin/mediator');
+
 EventBroker = loader('chaplin/lib/event_broker');
+
+History = loader('chaplin/lib/history');
 
 Route = loader('chaplin/lib/route');
 
@@ -1893,25 +2306,37 @@ module.exports = Router = (function() {
   _.extend(Router.prototype, EventBroker);
 
   function Router(options) {
+    var isWebFile;
     this.options = options != null ? options : {};
-    this.route = __bind(this.route, this);
-
     this.match = __bind(this.match, this);
 
+    isWebFile = window.location.protocol !== 'file:';
     _.defaults(this.options, {
-      pushState: true,
-      root: '/'
+      pushState: isWebFile,
+      root: '/',
+      trailing: false
     });
     this.removeRoot = new RegExp('^' + utils.escapeRegExp(this.options.root) + '(#)?');
-    this.subscribeEvent('!router:route', this.routeHandler);
-    this.subscribeEvent('!router:routeByName', this.routeByNameHandler);
-    this.subscribeEvent('!router:reverse', this.reverseHandler);
-    this.subscribeEvent('!router:changeURL', this.changeURLHandler);
+    this.subscribeEvent('!router:route', this.oldEventError);
+    this.subscribeEvent('!router:routeByName', this.oldEventError);
+    this.subscribeEvent('!router:changeURL', this.oldURLEventError);
+    this.subscribeEvent('dispatcher:dispatch', this.changeURL);
+    mediator.setHandler('router:route', this.route, this);
+    mediator.setHandler('router:reverse', this.reverse, this);
     this.createHistory();
   }
 
+  Router.prototype.oldEventError = function() {
+    throw new Error('!router:route and !router:routeByName events were removed.\
+  Use `Chaplin.utils.redirectTo`');
+  };
+
+  Router.prototype.oldURLEventError = function() {
+    throw new Error('!router:changeURL event was removed.');
+  };
+
   Router.prototype.createHistory = function() {
-    return Backbone.history || (Backbone.history = new Backbone.History());
+    return Backbone.history = new History();
   };
 
   Router.prototype.startHistory = function() {
@@ -1921,6 +2346,17 @@ module.exports = Router = (function() {
   Router.prototype.stopHistory = function() {
     if (Backbone.History.started) {
       return Backbone.history.stop();
+    }
+  };
+
+  Router.prototype.findHandler = function(predicate) {
+    var handler, _i, _len, _ref;
+    _ref = Backbone.history.handlers;
+    for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+      handler = _ref[_i];
+      if (predicate(handler)) {
+        return handler;
+      }
     }
   };
 
@@ -1942,6 +2378,9 @@ module.exports = Router = (function() {
       }
       _ref = target.split('#'), controller = _ref[0], action = _ref[1];
     }
+    _.defaults(options, {
+      trailing: this.options.trailing
+    });
     route = new Route(pattern, controller, action, options);
     Backbone.history.handlers.push({
       route: route,
@@ -1950,25 +2389,46 @@ module.exports = Router = (function() {
     return route;
   };
 
-  Router.prototype.route = function(path, options) {
-    var handler, _i, _len, _ref;
-    options = options ? _.clone(options) : {};
-    _.defaults(options, {
-      changeURL: true
-    });
-    path = path.replace(this.removeRoot, '');
-    _ref = Backbone.history.handlers;
-    for (_i = 0, _len = _ref.length; _i < _len; _i++) {
-      handler = _ref[_i];
-      if (handler.route.test(path)) {
-        handler.callback(path, options);
-        return true;
+  Router.prototype.route = function(pathDesc, params, options) {
+    var handler, path;
+    if (typeof pathDesc === 'object') {
+      path = pathDesc.url;
+      if (!params && pathDesc.params) {
+        params = pathDesc.params;
       }
     }
-    throw new Error('Router#route: request was not routed');
+    params = params ? utils.isArray(params) ? params.slice() : _.extend({}, params) : {};
+    if (path != null) {
+      path = path.replace(this.removeRoot, '');
+      handler = this.findHandler(function(handler) {
+        return handler.route.test(path);
+      });
+      options = params;
+      params = null;
+    } else {
+      options = options ? _.extend({}, options) : {};
+      handler = this.findHandler(function(handler) {
+        if (handler.route.matches(pathDesc)) {
+          params = handler.route.normalizeParams(params);
+          if (params) {
+            return true;
+          }
+        }
+        return false;
+      });
+    }
+    if (handler) {
+      _.defaults(options, {
+        changeURL: true
+      });
+      handler.callback(path || params, options);
+      return true;
+    } else {
+      throw new Error('Router#route: request was not routed');
+    }
   };
 
-  Router.prototype.reverse = function(criteria, params) {
+  Router.prototype.reverse = function(criteria, params, query) {
     var handler, handlers, reversed, root, url, _i, _len;
     root = this.options.root;
     if ((params != null) && typeof params !== 'object') {
@@ -1980,7 +2440,7 @@ module.exports = Router = (function() {
       if (!(handler.route.matches(criteria))) {
         continue;
       }
-      reversed = handler.route.reverse(params);
+      reversed = handler.route.reverse(params, query);
       if (reversed !== false) {
         url = root ? root + reversed : reversed;
         return url;
@@ -1989,40 +2449,17 @@ module.exports = Router = (function() {
     throw new Error('Router#reverse: invalid route specified');
   };
 
-  Router.prototype.routeHandler = function(path, options) {
-    if (typeof options === 'function') {
-      options = {};
+  Router.prototype.changeURL = function(controller, params, route, options) {
+    var navigateOptions, url;
+    if (!((route.path != null) && options.changeURL)) {
+      return;
     }
-    return this.route(path, options);
-  };
-
-  Router.prototype.routeByNameHandler = function(name, params, options, callback) {
-    var path;
-    if (arguments.length === 3 && typeof options === 'function') {
-      options = {};
-    }
-    path = this.reverse(name, params);
-    return this.route(path, options);
-  };
-
-  Router.prototype.reverseHandler = function(name, params, callback) {
-    return callback(this.reverse(name, params));
-  };
-
-  Router.prototype.changeURL = function(url, options) {
-    var navigateOptions;
-    if (options == null) {
-      options = {};
-    }
+    url = route.path + (route.query ? "?" + route.query : "");
     navigateOptions = {
       trigger: options.trigger === true,
       replace: options.replace === true
     };
     return Backbone.history.navigate(url, navigateOptions);
-  };
-
-  Router.prototype.changeURLHandler = function(url, options) {
-    return this.changeURL(url, options);
   };
 
   Router.prototype.disposed = false;
@@ -2034,6 +2471,7 @@ module.exports = Router = (function() {
     this.stopHistory();
     delete Backbone.history;
     this.unsubscribeAllEvents();
+    mediator.removeHandlers(this);
     this.disposed = true;
     return typeof Object.freeze === "function" ? Object.freeze(this) : void 0;
   };
@@ -2042,84 +2480,134 @@ module.exports = Router = (function() {
 
 })();
 
-});;loader.register('chaplin/lib/delayer', function(e, r, module) {
+});;loader.register('chaplin/lib/history', function(e, r, module) {
 'use strict';
 
-var Delayer;
+var Backbone, History, isExplorer, rootStripper, routeStripper, trailingSlash, _,
+  __hasProp = {}.hasOwnProperty,
+  __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; };
 
-Delayer = {
-  setTimeout: function(name, time, handler) {
-    var handle, wrappedHandler, _ref,
-      _this = this;
-    if ((_ref = this.timeouts) == null) {
-      this.timeouts = {};
-    }
-    this.clearTimeout(name);
-    wrappedHandler = function() {
-      delete _this.timeouts[name];
-      return handler();
-    };
-    handle = setTimeout(wrappedHandler, time);
-    this.timeouts[name] = handle;
-    return handle;
-  },
-  clearTimeout: function(name) {
-    if (!(this.timeouts && (this.timeouts[name] != null))) {
-      return;
-    }
-    clearTimeout(this.timeouts[name]);
-    delete this.timeouts[name];
-  },
-  clearAllTimeouts: function() {
-    var handle, name, _ref;
-    if (!this.timeouts) {
-      return;
-    }
-    _ref = this.timeouts;
-    for (name in _ref) {
-      handle = _ref[name];
-      this.clearTimeout(name);
-    }
-  },
-  setInterval: function(name, time, handler) {
-    var handle, _ref;
-    this.clearInterval(name);
-    if ((_ref = this.intervals) == null) {
-      this.intervals = {};
-    }
-    handle = setInterval(handler, time);
-    this.intervals[name] = handle;
-    return handle;
-  },
-  clearInterval: function(name) {
-    if (!(this.intervals && this.intervals[name])) {
-      return;
-    }
-    clearInterval(this.intervals[name]);
-    delete this.intervals[name];
-  },
-  clearAllIntervals: function() {
-    var handle, name, _ref;
-    if (!this.intervals) {
-      return;
-    }
-    _ref = this.intervals;
-    for (name in _ref) {
-      handle = _ref[name];
-      this.clearInterval(name);
-    }
-  },
-  clearDelayed: function() {
-    this.clearAllTimeouts();
-    this.clearAllIntervals();
+_ = loader('underscore');
+
+Backbone = loader('backbone');
+
+routeStripper = /^[#\/]|\s+$/g;
+
+rootStripper = /^\/+|\/+$/g;
+
+isExplorer = /msie [\w.]+/;
+
+trailingSlash = /\/$/;
+
+History = (function(_super) {
+
+  __extends(History, _super);
+
+  function History() {
+    return History.__super__.constructor.apply(this, arguments);
   }
-};
 
-if (typeof Object.freeze === "function") {
-  Object.freeze(Delayer);
-}
+  History.prototype.getFragment = function(fragment, forcePushState) {
+    var root;
+    if (!(fragment != null)) {
+      if (this._hasPushState || !this._wantsHashChange || forcePushState) {
+        fragment = this.location.pathname + this.location.search;
+        root = this.root.replace(trailingSlash, '');
+        if (!fragment.indexOf(root)) {
+          fragment = fragment.substr(root.length);
+        }
+      } else {
+        fragment = this.getHash();
+      }
+    }
+    return fragment.replace(routeStripper, '');
+  };
 
-module.exports = Delayer;
+  History.prototype.start = function(options) {
+    var atRoot, fragment, loc;
+    if (Backbone.History.started) {
+      throw new Error('Backbone.history has already been started');
+    }
+    Backbone.History.started = true;
+    this.options = _.extend({}, {
+      root: '/'
+    }, this.options, options);
+    this.root = this.options.root;
+    this._wantsHashChange = this.options.hashChange !== false;
+    this._wantsPushState = Boolean(this.options.pushState);
+    this._hasPushState = Boolean(this.options.pushState && this.history && this.history.pushState);
+    fragment = this.getFragment();
+    this.root = ('/' + this.root + '/').replace(rootStripper, '/');
+    if (this._hasPushState) {
+      Backbone.$(window).on('popstate', this.checkUrl);
+    } else if (this._wantsHashChange && 'onhashchange' in window) {
+      Backbone.$(window).on('hashchange', this.checkUrl);
+    } else if (this._wantsHashChange) {
+      this._checkUrlInterval = setInterval(this.checkUrl, this.interval);
+    }
+    this.fragment = fragment;
+    loc = this.location;
+    atRoot = loc.pathname.replace(/[^\/]$/, '$&/') === this.root;
+    if (this._wantsHashChange && this._wantsPushState && !this._hasPushState && !atRoot) {
+      this.fragment = this.getFragment(null, true);
+      this.location.replace(this.root + '#' + this.fragment);
+      return true;
+    } else if (this._wantsPushState && this._hasPushState && atRoot && loc.hash) {
+      this.fragment = this.getHash().replace(routeStripper, '');
+      this.history.replaceState({}, document.title, this.root + this.fragment);
+    }
+    if (!this.options.silent) {
+      return this.loadUrl();
+    }
+  };
+
+  History.prototype.navigate = function(fragment, options) {
+    var historyMethod, isSameFragment, url;
+    if (fragment == null) {
+      fragment = '';
+    }
+    if (!Backbone.History.started) {
+      return false;
+    }
+    if (!options || options === true) {
+      options = {
+        trigger: options
+      };
+    }
+    fragment = this.getFragment(fragment);
+    url = this.root + fragment;
+    if (this.fragment === fragment) {
+      return false;
+    }
+    this.fragment = fragment;
+    if (fragment.length === 0 && url !== '/') {
+      url = url.slice(0, -1);
+    }
+    if (this._hasPushState) {
+      historyMethod = options.replace ? 'replaceState' : 'pushState';
+      this.history[historyMethod]({}, document.title, url);
+    } else if (this._wantsHashChange) {
+      this._updateHash(this.location, fragment, options.replace);
+      isSameFragment = fragment !== this.getFragment(this.getHash(this.iframe));
+      if ((this.iframe != null) && isSameFragment) {
+        if (!options.replace) {
+          this.iframe.document.open().close();
+        }
+        this._updateHash(this.iframe.location, fragment, options.replace);
+      }
+    } else {
+      return this.location.assign(url);
+    }
+    if (options.trigger) {
+      return this.loadUrl(fragment);
+    }
+  };
+
+  return History;
+
+})(Backbone.History);
+
+module.exports = Backbone.$ ? History : Backbone.History;
 
 });;loader.register('chaplin/lib/event_broker', function(e, r, module) {
 'use strict';
@@ -2196,7 +2684,7 @@ module.exports = support;
 });;loader.register('chaplin/lib/composition', function(e, r, module) {
 'use strict';
 
-var Backbone, Composition, EventBroker, _,
+var Backbone, Composition, EventBroker, has, _,
   __hasProp = {}.hasOwnProperty;
 
 _ = loader('underscore');
@@ -2204,6 +2692,8 @@ _ = loader('underscore');
 Backbone = loader('backbone');
 
 EventBroker = loader('chaplin/lib/event_broker');
+
+has = Object.prototype.hasOwnProperty;
 
 module.exports = Composition = (function() {
 
@@ -2221,7 +2711,7 @@ module.exports = Composition = (function() {
 
   function Composition(options) {
     if (options != null) {
-      this.options = _.clone(options);
+      this.options = _.extend({}, options);
     }
     this.item = this;
     this.initialize(this.options);
@@ -2243,7 +2733,7 @@ module.exports = Composition = (function() {
     this._stale = value;
     for (name in this) {
       item = this[name];
-      if (item && item !== this && _.has(item, 'stale')) {
+      if (item && item !== this && typeof item === 'object' && has.call(item, 'stale')) {
         item.stale = value;
       }
     }
@@ -2373,7 +2863,8 @@ module.exports = SyncMachine;
 
 var support, utils, _,
   __slice = [].slice,
-  __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
+  __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
+  __hasProp = {}.hasOwnProperty;
 
 _ = loader('underscore');
 
@@ -2392,6 +2883,16 @@ utils = {
       };
     }
   })(),
+  indexOf: (function() {
+    if (Array.prototype.indexOf) {
+      return function(list, index) {
+        return list.indexOf(index);
+      };
+    } else if (_.indexOf) {
+      return _.indexOf;
+    }
+  })(),
+  isArray: Array.isArray || _.isArray,
   serialize: function(data) {
     if (typeof data.serialize === 'function') {
       return data.serialize();
@@ -2426,12 +2927,12 @@ utils = {
     }
   })(),
   getPrototypeChain: function(object) {
-    var chain, _ref;
+    var chain, _ref, _ref1, _ref2;
     chain = [object.constructor.prototype];
-    while (object = (_ref = object.constructor) != null ? _ref.__super__ : void 0) {
+    while (object = (_ref = (_ref1 = object.constructor) != null ? _ref1.__super__ : void 0) != null ? _ref : (_ref2 = object.constructor) != null ? _ref2.superclass : void 0) {
       chain.push(object);
     }
-    return chain;
+    return chain.reverse();
   },
   getAllPropertyVersions: function(object, property) {
     var proto, result, value, _i, _len, _ref;
@@ -2444,7 +2945,7 @@ utils = {
         result.push(value);
       }
     }
-    return result.reverse();
+    return result;
   },
   upcase: function(str) {
     return str.charAt(0).toUpperCase() + str.substring(1);
@@ -2454,6 +2955,70 @@ utils = {
   },
   modifierKeyPressed: function(event) {
     return event.shiftKey || event.altKey || event.ctrlKey || event.metaKey;
+  },
+  reverse: function(criteria, params, query) {
+    return loader('chaplin/mediator').execute('router:reverse', criteria, params, query);
+  },
+  redirectTo: function(pathDesc, params, options) {
+    return loader('chaplin/mediator').execute('router:route', pathDesc, params, options);
+  },
+  queryParams: {
+    stringify: function(queryParams) {
+      var arrParam, encodedKey, key, query, stringifyKeyValuePair, value, _i, _len;
+      query = '';
+      stringifyKeyValuePair = function(encodedKey, value) {
+        if (value != null) {
+          return '&' + encodedKey + '=' + encodeURIComponent(value);
+        } else {
+          return '';
+        }
+      };
+      for (key in queryParams) {
+        if (!__hasProp.call(queryParams, key)) continue;
+        value = queryParams[key];
+        encodedKey = encodeURIComponent(key);
+        if (utils.isArray(value)) {
+          for (_i = 0, _len = value.length; _i < _len; _i++) {
+            arrParam = value[_i];
+            query += stringifyKeyValuePair(encodedKey, arrParam);
+          }
+        } else {
+          query += stringifyKeyValuePair(encodedKey, value);
+        }
+      }
+      return query && query.substring(1);
+    },
+    parse: function(queryString) {
+      var current, field, pair, pairs, params, value, _i, _len, _ref;
+      params = {};
+      if (!queryString) {
+        return params;
+      }
+      pairs = queryString.split('&');
+      for (_i = 0, _len = pairs.length; _i < _len; _i++) {
+        pair = pairs[_i];
+        if (!pair.length) {
+          continue;
+        }
+        _ref = pair.split('='), field = _ref[0], value = _ref[1];
+        if (!field.length) {
+          continue;
+        }
+        field = decodeURIComponent(field);
+        value = decodeURIComponent(value);
+        current = params[field];
+        if (current) {
+          if (current.push) {
+            current.push(value);
+          } else {
+            params[field] = [current, value];
+          }
+        } else {
+          params[field] = value;
+        }
+      }
+      return params;
+    }
   }
 };
 
@@ -2462,26 +3027,6 @@ if (typeof Object.seal === "function") {
 }
 
 module.exports = utils;
-
-});;loader.register('chaplin/lib/helpers', function(e, r, module) {
-'use strict';
-
-var helpers, mediator;
-
-mediator = loader('chaplin/mediator');
-
-helpers = {
-  reverse: function(routeName, params) {
-    var url;
-    url = null;
-    mediator.publish('!router:reverse', routeName, params, function(result) {
-      return url = result;
-    });
-    return url;
-  }
-};
-
-module.exports = helpers;
 
 });;loader.register('chaplin', function(e, r, module) {
 
@@ -2499,9 +3044,7 @@ module.exports = {
   CollectionView: loader('chaplin/views/collection_view'),
   Route: loader('chaplin/lib/route'),
   Router: loader('chaplin/lib/router'),
-  Delayer: loader('chaplin/lib/delayer'),
   EventBroker: loader('chaplin/lib/event_broker'),
-  helpers: loader('chaplin/lib/helpers'),
   support: loader('chaplin/lib/support'),
   SyncMachine: loader('chaplin/lib/sync_machine'),
   utils: loader('chaplin/lib/utils')
@@ -2526,7 +3069,7 @@ if (typeof define === 'function' && define.amd) {
   regDeps(require('backbone'), require('underscore'));
   module.exports = loader('chaplin');
 } else if (typeof require === 'function') {
-  regDeps(window.Backbone, window._);
+  regDeps(window.Backbone, window._ || window.Backbone.utils);
   window.Chaplin = loader('chaplin');
 } else {
   throw new Error('Chaplin requires Common.js or AMD modules');

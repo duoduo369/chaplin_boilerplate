@@ -1,3 +1,10 @@
-ListView = require 'tutorial/views/home/list-view'
+Application   = require 'common/application'
+config   = require 'common/config'
+routes = require './routes'
 
-list_view = new ListView
+
+$ ->
+  new Application
+    routes: routes
+    controllerSuffix: config.controllerSuffix
+    controllerPath: 'tutorial/controllers/'
